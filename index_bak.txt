@@ -14,9 +14,6 @@
  *  See the License for the specific language governing permissions and
  *  limitations under the License.
  ******************************************************************************* */
-import { DeviceStrategy } from './DeviceStrategy';
-import { KeystoneDevice } from './KeystoneDevice';
-import { LedgerDevice } from './LedgerDevice';
 import Transport from '@ledgerhq/hw-transport'
 import { TransportWebUSB } from '@keystonehq/hw-transport-webusb';
 import { Eth as KeystoneEth } from '@keystonehq/hw-app-eth'
@@ -53,6 +50,7 @@ import { ResponseAddress, ResponseAppInfo, ResponseBase, ResponseSign, ResponseV
 import Eth from '@ledgerhq/hw-app-eth'
 
 import { LedgerEthTransactionResolution, LoadConfig, ResolutionConfig } from '@ledgerhq/hw-app-eth/lib/services/types'
+import { EIP712Message } from '@ledgerhq/types-live'
 
 export * from './types'
 export { LedgerError }
@@ -115,24 +113,28 @@ function processGetXPubResponse(response: Buffer) {
 }
 
 export default class AvalancheApp {
-  private strategy: DeviceStrategy;
+  transport: Transport | TransportWebUSB
+  private eth: Eth | KeystoneEth
+  private hwDevice: HWDevice
 
-  constructor(transport: Transport | TransportWebUSB, ethScrambleKey = 'w0w', ethLoadConfig = {}) {
+  constructor(transport: Transport | TransportWebUSB, ethScrambleKey = 'w0w', ethLoadConfig: LoadConfig = {}) {
+    this.transport = transport
     if (!transport) {
-      throw new Error('Transport has not been defined');
+      throw new Error('Transport has not been defined')
     }
-
-    const ethInstance = transport instanceof TransportWebUSB
-      ? new KeystoneEth(transport)
-      : new Eth(transport, ethScrambleKey, ethLoadConfig);
-
-    const hwDevice = transport instanceof TransportWebUSB ? HWDevice.KEYSTONE : HWDevice.LEDGER;
-
-    this.strategy = hwDevice === HWDevice.KEYSTONE
-      ? new KeystoneDevice(ethInstance as KeystoneEth)
-      : new LedgerDevice(ethInstance as Eth, transport as Transport);
+    if (transport instanceof TransportWebUSB) {
+      this.eth = new KeystoneEth(transport);
+      this.hwDevice = HWDevice.KEYSTONE;
+    } else {
+      this.eth = new Eth(transport, ethScrambleKey, ethLoadConfig);
+      this.hwDevice = HWDevice.LEDGER;
+    }
   }
-  
+
+  getHWDevice(): HWDevice {
+    return this.hwDevice;
+  }
+
   private static prepareChunks(message: Buffer, serializedPathBuffer?: Buffer) {
     const chunks = []
 
@@ -501,24 +503,49 @@ export default class AvalancheApp {
   //   return this._xpub(path, show, hrp, chainid)
   // }
 
-  async getWalletId(): Promise<ResponseWalletId> {
-    return this.strategy.getWalletId();
+  private async _walletId(show: boolean): Promise<ResponseWalletId> {
+    if (this.getHWDevice() === HWDevice.KEYSTONE) {
+      return {
+        returnCode: 0,
+        errorMessage: '',
+        id: Buffer.alloc(6)
+      };
+    } else {
+      const p1 = show ? P1_VALUES.SHOW_ADDRESS_IN_DEVICE : P1_VALUES.ONLY_RETRIEVE
+
+      return (this.transport as Transport).send(CLA, INS.WALLET_ID, p1, 0).then(response => {
+        const errorCodeData = response.slice(-2)
+        const returnCode = (errorCodeData[0] * 256 + errorCodeData[1]) as LedgerError
+
+        return {
+          returnCode,
+          errorMessage: errorCodeToString(returnCode),
+          id: response.slice(0, 6),
+        }
+      }, processErrorResponse)
+    }
   }
 
-  async showWalletId(): Promise<ResponseWalletId> {
-    return this.strategy.showWalletId();
+  async getWalletId() {
+    return this._walletId(false)
   }
 
-  async signEVMTransaction(
+  async showWalletId() {
+    return this._walletId(true)
+  }
+
+  signEVMTransaction(
     path: string,
     rawTxHex: string,
-    resolution?: LedgerEthTransactionResolution | null
+    resolution?: LedgerEthTransactionResolution | null,
   ): Promise<{
-    s: string;
-    v: string;
-    r: string;
+    s: string
+    v: string
+    r: string
   }> {
-    return this.strategy.signEVMTransaction(path, rawTxHex, resolution);
+    return this.getHWDevice() === HWDevice.KEYSTONE
+      ? (this.eth as KeystoneEth).signTransaction(path, rawTxHex)
+      : (this.eth as Eth).signTransaction(path, rawTxHex, resolution || undefined);
   }
 
   getETHAddress(
@@ -530,17 +557,21 @@ export default class AvalancheApp {
     address: string
     chainCode?: string
   }> {
-    return this.strategy.getETHAddress(path, boolDisplay, boolChaincode)
+    return this.eth.getAddress(path, boolDisplay, boolChaincode)
   }
 
-  async getAppConfiguration(): Promise<{
-    arbitraryDataEnabled: number;
-    erc20ProvisioningNecessary: number;
-    starkEnabled: number;
-    starkv2Supported: number;
-    version: string;
+  getAppConfiguration(): Promise<{
+    arbitraryDataEnabled: number
+    erc20ProvisioningNecessary: number
+    starkEnabled: number
+    starkv2Supported: number
+    version: string
   }> {
-    return this.strategy.getAppConfiguration();
+    if (this.getHWDevice() === HWDevice.LEDGER) {
+      return (this.eth as Eth).getAppConfiguration()
+    } else {
+      return Promise.resolve({ arbitraryDataEnabled: 0, erc20ProvisioningNecessary: 0, starkEnabled: 0, starkv2Supported: 0, version: '0.0.0' })
+    }
   }
 
   // async provideERC20TokenInformation(
@@ -594,21 +625,149 @@ export default class AvalancheApp {
   //   return this.eth.provideERC20TokenInformation(buffer.toString('hex'))
   // }
 
-  async provideNFTInformation(
-    collectionName: string,
-    contractAddress: string,
-    chainId: bigint
-  ): Promise<boolean> {
-    return this.strategy.provideNFTInformation(collectionName, contractAddress, chainId);
-  }
+  // async provideNFTInformation(collectionName: string, contractAddress: string, chainId: bigint): Promise<boolean> {
+  //   const NAME_LENGTH_SIZE = 1
+  //   const HEADER_SIZE = TYPE_SIZE + VERSION_SIZE + NAME_LENGTH_SIZE
+  //   const KEY_ID_SIZE = 1
+  //   const PROD_NFT_METADATA_KEY = 1
 
-  async setPlugin(
-    contractAddress: string,
-    methodSelector: string,
-    chainId: bigint
-  ): Promise<boolean> {
-    return this.strategy.setPlugin(contractAddress, methodSelector, chainId);
-  }
+  //   const collectionNameLength = Buffer.byteLength(collectionName, 'utf8')
+
+  //   if (collectionNameLength > COLLECTION_NAME_MAX_LEN) {
+  //     throw new Error(`Collection name exceeds maximum allowed length of ${COLLECTION_NAME_MAX_LEN}`)
+  //   }
+
+  //   // We generate a fake signature, because verification is disabled
+  //   // in the app.
+  //   const fakeDerSignature = this._generateFakeDerSignature()
+
+  //   const buffer = Buffer.alloc(
+  //     HEADER_SIZE +
+  //     collectionNameLength +
+  //     ADDRESS_LENGTH +
+  //     CHAIN_ID_SIZE +
+  //     KEY_ID_SIZE +
+  //     ALGORITHM_ID_SIZE +
+  //     SIGNATURE_LENGTH_SIZE +
+  //     fakeDerSignature.length,
+  //   )
+
+  //   let offset = 0
+
+  //   buffer.writeUInt8(TYPE_1, offset)
+  //   offset += TYPE_SIZE
+
+  //   buffer.writeUInt8(VERSION_1, offset)
+  //   offset += VERSION_SIZE
+
+  //   buffer.writeUInt8(collectionNameLength, offset)
+  //   offset += NAME_LENGTH_SIZE
+
+  //   buffer.write(collectionName, offset, 'utf8')
+  //   offset += collectionNameLength
+
+  //   Buffer.from(contractAddress.slice(2), 'hex').copy(new Uint8Array(buffer), offset) // Remove '0x' from address
+  //   offset += ADDRESS_LENGTH
+
+  //   buffer.writeBigUInt64BE(chainId, offset)
+  //   offset += CHAIN_ID_SIZE
+
+  //   buffer.writeUInt8(PROD_NFT_METADATA_KEY, offset) // Assume production key for simplicity
+  //   offset += KEY_ID_SIZE
+
+  //   buffer.writeUInt8(ALGORITHM_ID_1, offset) // Assume a specific algorithm for signature or hash
+  //   offset += ALGORITHM_ID_SIZE
+
+  //   buffer.writeUInt8(fakeDerSignature.length, offset)
+  //   offset += SIGNATURE_LENGTH_SIZE
+
+  //   fakeDerSignature.copy(new Uint8Array(buffer), offset)
+
+  //   return this.eth.provideNFTInformation(buffer.toString('hex'))
+  // }
+
+  // _generateFakeDerSignature(): Buffer {
+  //   const fakeSignatureLength = 70
+  //   const fakeDerSignature = Buffer.alloc(fakeSignatureLength)
+
+  //   // Fill the buffer with random bytes
+  //   for (let i = 0; i < fakeSignatureLength; i++) {
+  //     fakeDerSignature[i] = Math.floor(Math.random() * 256)
+  //   }
+
+  //   return fakeDerSignature
+  // }
+
+  // // We assume pluginName is ERC721 for Nft tokens
+  // async setPlugin(contractAddress: string, methodSelector: string, chainId: bigint): Promise<boolean> {
+  //   const KEY_ID = 2
+  //   const PLUGIN_NAME_LENGTH_SIZE = 1
+  //   const KEY_ID_SIZE = 1
+  //   const PLUGIN_NAME = 'ERC721'
+
+  //   const pluginNameBuffer = Buffer.from(PLUGIN_NAME, 'utf8')
+  //   const pluginNameLength = pluginNameBuffer.length
+
+  //   const contractAddressBuffer = Buffer.from(contractAddress.slice(2), 'hex')
+  //   const methodSelectorBuffer = Buffer.from(methodSelector.slice(2), 'hex')
+
+  //   // We generate a fake signature, because verification is disabled
+  //   // in the app.
+  //   const signatureBuffer = this._generateFakeDerSignature()
+  //   const signatureLength = signatureBuffer.length
+
+  //   const buffer = Buffer.alloc(
+  //     TYPE_SIZE +
+  //     VERSION_SIZE +
+  //     PLUGIN_NAME_LENGTH_SIZE +
+  //     pluginNameLength +
+  //     contractAddressBuffer.length +
+  //     methodSelectorBuffer.length +
+  //     CHAIN_ID_SIZE +
+  //     KEY_ID_SIZE +
+  //     ALGORITHM_ID_SIZE +
+  //     SIGNATURE_LENGTH_SIZE +
+  //     signatureLength,
+  //   )
+
+  //   let offset = 0
+
+  //   buffer.writeUInt8(TYPE_1, offset)
+  //   offset += TYPE_SIZE
+
+  //   buffer.writeUInt8(VERSION_1, offset)
+  //   offset += VERSION_SIZE
+
+  //   buffer.writeUInt8(pluginNameLength, offset)
+  //   offset += PLUGIN_NAME_LENGTH_SIZE
+
+  //   pluginNameBuffer.copy(new Uint8Array(buffer), offset)
+  //   offset += pluginNameLength
+
+  //   contractAddressBuffer.copy(new Uint8Array(buffer), offset)
+  //   offset += contractAddressBuffer.length
+
+  //   methodSelectorBuffer.copy(new Uint8Array(buffer), offset)
+  //   offset += methodSelectorBuffer.length
+
+  //   buffer.writeBigUInt64BE(BigInt(chainId), offset)
+  //   offset += CHAIN_ID_SIZE
+
+  //   // use default key_id
+  //   buffer.writeUInt8(KEY_ID, offset)
+  //   offset += KEY_ID_SIZE
+
+  //   // use default algorithm
+  //   buffer.writeUInt8(ALGORITHM_ID_1, offset)
+  //   offset += ALGORITHM_ID_SIZE
+
+  //   buffer.writeUInt8(signatureLength, offset)
+  //   offset += SIGNATURE_LENGTH_SIZE
+
+  //   signatureBuffer.copy(new Uint8Array(buffer), offset)
+
+  //   return this.eth.setPlugin(buffer.toString('hex'))
+  // }
 
   // async clearSignTransaction(
   //   path: string,
@@ -619,9 +778,13 @@ export default class AvalancheApp {
   //   return this.eth.clearSignTransaction(path, rawTxHex, resolutionConfig, throwOnError)
   // }
 
-  // async signEIP712Message(path: string, jsonMessage: EIP712Message, fullImplem = false): Promise<{ v: number; s: string; r: string }> {
-  //   return this.strategy.signEIP712Message(path, jsonMessage, fullImplem);
-  // }
+  async signEIP712Message(path: string, jsonMessage: EIP712Message, fullImplem = false): Promise<{ v: number; s: string; r: string }> {
+    if (this.getHWDevice() == HWDevice.KEYSTONE) {
+      return this.eth.signEIP712Message(path, jsonMessage as Object);
+    } else {
+      return this.eth.signEIP712Message(path, jsonMessage, fullImplem)
+    }
+  }
 
   // async signEIP712HashedMessage(
   //   path: string,
