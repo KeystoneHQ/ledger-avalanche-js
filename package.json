@@ -21,15 +21,16 @@
   ],
   "scripts": {
     "build": "rollup -c && tsc -m commonjs",
-    "prettier": "prettier --write ./"
+    "prettier": "prettier --write ./",
+    "watch": "rollup -c -w & tsc -m commonjs -w"
   },
   "bugs": {
     "url": "https://github.com/ava-labs/ledger-avalanche-js/issues"
   },
   "dependencies": {
+    "@keystonehq/hw-app-eth": "0.4.4",
     "@keystonehq/hw-transport-usb": "0.1.1",
-    "@keystonehq/hw-transport-webusb": "^0.3.2",
-    "@keystonehq/hw-app-eth":"0.4.4",
+    "@keystonehq/hw-transport-webusb": "0.5.1",
     "@ledgerhq/hw-app-eth": "6.38.2",
     "@ledgerhq/hw-transport": "6.31.4",
     "bs58": "6.0.0",

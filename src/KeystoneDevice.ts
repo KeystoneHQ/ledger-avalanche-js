@@ -1,7 +1,8 @@
 import { DeviceStrategy } from './DeviceStrategy';
 import { Eth as KeystoneEth } from '@keystonehq/hw-app-eth';
 import { EIP712Message } from '@ledgerhq/types-live';
-import { ResponseWalletId } from './types';
+import { ResponseWalletId, ResponseAppInfo } from './types';
+import { ResolutionConfig } from '@ledgerhq/hw-app-eth/lib/services/types';
 
 export class KeystoneDevice implements DeviceStrategy {
   private eth: KeystoneEth;
@@ -10,9 +11,32 @@ export class KeystoneDevice implements DeviceStrategy {
     this.eth = eth;
   }
 
-  //   async signEIP712Message(path: string, jsonMessage: EIP712Message): Promise<{ v: number; s: string; r: string }> {
-  //     return this.eth.signEIP712Message(path, jsonMessage as Object);
-  //   }
+  getAppInfo(): Promise<ResponseAppInfo> {
+    let appName = "Avalanche";
+  
+    return Promise.resolve({
+      appName,
+      appVersion: "",
+      flagLen: 0,
+      flagsValue: 0,
+      flagRecovery: false,
+      flagSignedMcuCode: false,
+      flagOnboarded: false,
+      flagPINValidated: false,
+      errorMessage: "",
+      returnCode: 0,
+    });
+  }
+
+  async getExtendedPubKey(
+    path: string,
+    show: boolean,
+    hrp?: string,
+    chainid?: string
+  ): Promise<any> {
+    // @todo
+    return Promise.reject(new Error('Keystone does not support extended public key retrieval.'));
+  }
 
   async getWalletId(): Promise<ResponseWalletId> {
     return {
@@ -84,5 +108,36 @@ export class KeystoneDevice implements DeviceStrategy {
     chainId: bigint
   ): Promise<boolean> {
     return Promise.reject(new Error('Keystone does not support setPlugin operation.'));
+  }
+
+  async provideERC20TokenInformation(
+    ticker: string,
+    contractName: string,
+    address: string,
+    decimals: number,
+    chainId: number
+  ): Promise<boolean> {
+    return Promise.reject(new Error('Keystone does not support ERC20 token information provision.'));
+  }
+
+  async clearSignTransaction(
+    path: string,
+    rawTxHex: string,
+    resolutionConfig: ResolutionConfig,
+    throwOnError = false
+  ): Promise<{ r: string; s: string; v: string }> {
+    return Promise.reject(new Error('Keystone does not support clearSignTransaction.'));
+  }
+
+  // async signEIP712Message(path: string, jsonMessage: EIP712Message): Promise<{ v: number; s: string; r: string }> {
+  //   return this.eth.signEIP712Message(path, jsonMessage as Object);
+  // }
+
+  async signEIP712HashedMessage(
+    path: string,
+    domainSeparatorHex: string,
+    hashStructMessageHex: string
+  ): Promise<{ v: number; s: string; r: string }> {
+    return Promise.reject(new Error('Keystone does not support signing EIP-712 hashed messages.'));
   }
 }

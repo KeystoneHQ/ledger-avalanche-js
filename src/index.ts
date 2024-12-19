@@ -91,29 +91,6 @@ function processGetAddrResponse(response: Buffer) {
   }
 }
 
-function processGetXPubResponse(response: Buffer) {
-  let partialResponse = response
-
-  const errorCodeData = partialResponse.slice(-2)
-  const returnCode = errorCodeData[0] * 256 + errorCodeData[1]
-
-  //get public key len (variable)
-  const PKLEN = partialResponse[0]
-  const publicKey = Buffer.from(partialResponse.slice(1, 1 + PKLEN))
-
-  //"advance" buffer
-  partialResponse = partialResponse.slice(1 + PKLEN)
-
-  const chain_code = Buffer.from(partialResponse.slice(0, -2))
-
-  return {
-    publicKey,
-    chain_code,
-    returnCode,
-    errorMessage: errorCodeToString(returnCode),
-  }
-}
-
 export default class AvalancheApp {
   private strategy: DeviceStrategy;
 
@@ -121,18 +98,17 @@ export default class AvalancheApp {
     if (!transport) {
       throw new Error('Transport has not been defined');
     }
-
-    const ethInstance = transport instanceof TransportWebUSB
-      ? new KeystoneEth(transport)
-      : new Eth(transport, ethScrambleKey, ethLoadConfig);
-
-    const hwDevice = transport instanceof TransportWebUSB ? HWDevice.KEYSTONE : HWDevice.LEDGER;
-
-    this.strategy = hwDevice === HWDevice.KEYSTONE
-      ? new KeystoneDevice(ethInstance as KeystoneEth)
-      : new LedgerDevice(ethInstance as Eth, transport as Transport);
+    
+    let ethInstance;
+    if (transport instanceof Transport) {
+      ethInstance = new Eth(transport, ethScrambleKey, ethLoadConfig);
+      this.strategy = new LedgerDevice(ethInstance as Eth, transport);
+    } else {
+      ethInstance = new KeystoneEth(transport);
+      this.strategy = new KeystoneDevice(ethInstance as KeystoneEth);
+    }
   }
-  
+
   private static prepareChunks(message: Buffer, serializedPathBuffer?: Buffer) {
     const chunks = []
 
@@ -419,55 +395,9 @@ export default class AvalancheApp {
   // async getVersion(): Promise<ResponseVersion> {
   //   return getVersion(this.transport).catch(err => processErrorResponse(err))
   // }
-
-  // async getAppInfo(): Promise<ResponseAppInfo> {
-  //   return this.transport.send(0xb0, 0x01, 0, 0).then(response => {
-  //     const errorCodeData = response.slice(-2)
-  //     const returnCode = errorCodeData[0] * 256 + errorCodeData[1]
-
-  //     const result: { errorMessage?: string; returnCode?: LedgerError } = {}
-
-  //     let appName = 'err'
-  //     let appVersion = 'err'
-  //     let flagLen = 0
-  //     let flagsValue = 0
-
-  //     if (response[0] !== 1) {
-  //       // Ledger responds with format ID 1. There is no spec for any format != 1
-  //       result.errorMessage = 'response format ID not recognized'
-  //       result.returnCode = LedgerError.DeviceIsBusy
-  //     } else {
-  //       const appNameLen = response[1]
-  //       appName = response.slice(2, 2 + appNameLen).toString('ascii')
-  //       let idx = 2 + appNameLen
-  //       const appVersionLen = response[idx]
-  //       idx += 1
-  //       appVersion = response.slice(idx, idx + appVersionLen).toString('ascii')
-  //       idx += appVersionLen
-  //       const appFlagsLen = response[idx]
-  //       idx += 1
-  //       flagLen = appFlagsLen
-  //       flagsValue = response[idx]
-  //     }
-
-  //     return {
-  //       returnCode,
-  //       errorMessage: errorCodeToString(returnCode),
-  //       //
-  //       appName,
-  //       appVersion,
-  //       flagLen,
-  //       flagsValue,
-  //       flagRecovery: (flagsValue & 1) !== 0,
-  //       // eslint-disable-next-line no-bitwise
-  //       flagSignedMcuCode: (flagsValue & 2) !== 0,
-  //       // eslint-disable-next-line no-bitwise
-  //       flagOnboarded: (flagsValue & 4) !== 0,
-  //       // eslint-disable-next-line no-bitwise
-  //       flagPINValidated: (flagsValue & 128) !== 0,
-  //     }
-  //   }, processErrorResponse)
-  // }
+  async getAppInfo(): Promise<ResponseAppInfo> {
+    return this.strategy.getAppInfo()
+  }
 
   // private async _pubkey(path: string, show: boolean, hrp?: string, chainid?: string): Promise<ResponseAddress> {
   //   const p1 = show ? P1_VALUES.SHOW_ADDRESS_IN_DEVICE : P1_VALUES.ONLY_RETRIEVE
@@ -484,22 +414,9 @@ export default class AvalancheApp {
   //   return this._pubkey(path, show, hrp, chainid)
   // }
 
-  // private async _xpub(path: string, show: boolean, hrp?: string, chainid?: string): Promise<ResponseXPub> {
-  //   const p1 = show ? P1_VALUES.SHOW_ADDRESS_IN_DEVICE : P1_VALUES.ONLY_RETRIEVE
-  //   const serializedPath = serializePath(path)
-  //   const serializedHrp = serializeHrp(hrp)
-  //   const serializedChainID = serializeChainID(chainid)
-
-  //   return this.transport
-  //     .send(CLA, INS.GET_EXTENDED_PUBLIC_KEY, p1, 0, Buffer.concat([new Uint8Array(serializedHrp), new Uint8Array(serializedChainID), new Uint8Array(serializedPath)]), [
-  //       LedgerError.NoErrors,
-  //     ])
-  //     .then(processGetXPubResponse, processErrorResponse)
-  // }
-
-  // async getExtendedPubKey(path: string, show: boolean, hrp?: string, chainid?: string) {
-  //   return this._xpub(path, show, hrp, chainid)
-  // }
+  async getExtendedPubKey(path: string, show: boolean, hrp?: string, chainid?: string) {
+    return this.strategy.getExtendedPubKey(path, show, hrp, chainid)
+  }
 
   async getWalletId(): Promise<ResponseWalletId> {
     return this.strategy.getWalletId();
@@ -543,56 +460,15 @@ export default class AvalancheApp {
     return this.strategy.getAppConfiguration();
   }
 
-  // async provideERC20TokenInformation(
-  //   ticker: string,
-  //   contractName: string,
-  //   address: string,
-  //   decimals: number,
-  //   chainId: number,
-  // ): Promise<boolean> {
-  //   // Calculate lengths
-  //   const tickerLength = Buffer.byteLength(ticker)
-  //   const contractNameLength = Buffer.byteLength(contractName)
-
-  //   // Create a buffer with the exact size needed
-  //   const buffer = Buffer.alloc(1 + tickerLength + 1 + contractNameLength + 20 + 4 + 4)
-
-  //   let offset = 0
-
-  //   // Ticker length and ticker
-  //   buffer.writeUInt8(tickerLength, offset)
-  //   offset += 1
-  //   buffer.write(ticker, offset)
-  //   offset += tickerLength
-
-  //   // Contract name length and contract name
-  //   buffer.writeUInt8(contractNameLength, offset)
-  //   offset += 1
-  //   buffer.write(contractName, offset)
-  //   offset += contractNameLength
-
-  //   // Address (20 bytes, hex string needs to be parsed)
-
-  //   var addr_offset = 0
-  //   if (address.startsWith('0x')) {
-  //     addr_offset = 2
-  //   }
-
-  //   // Slice to remove '0x'
-  //   const addressBuffer = Buffer.from(address.slice(addr_offset), 'hex')
-  //   addressBuffer.copy(new Uint8Array(buffer), offset)
-  //   offset += 20
-
-  //   // Decimals (4 bytes, big endian)
-  //   buffer.writeUInt32BE(decimals, offset)
-  //   offset += 4
-
-  //   // Chain ID (4 bytes, big endian)
-  //   buffer.writeUInt32BE(chainId, offset)
-  //   offset += 4
-
-  //   return this.eth.provideERC20TokenInformation(buffer.toString('hex'))
-  // }
+  async provideERC20TokenInformation(
+    ticker: string,
+    contractName: string,
+    address: string,
+    decimals: number,
+    chainId: number
+  ): Promise<boolean> {
+    return this.strategy.provideERC20TokenInformation(ticker, contractName, address, decimals, chainId);
+  }
 
   async provideNFTInformation(
     collectionName: string,
@@ -610,24 +486,24 @@ export default class AvalancheApp {
     return this.strategy.setPlugin(contractAddress, methodSelector, chainId);
   }
 
-  // async clearSignTransaction(
-  //   path: string,
-  //   rawTxHex: string,
-  //   resolutionConfig: ResolutionConfig,
-  //   throwOnError = false,
-  // ): Promise<{ r: string; s: string; v: string }> {
-  //   return this.eth.clearSignTransaction(path, rawTxHex, resolutionConfig, throwOnError)
-  // }
+  async clearSignTransaction(
+    path: string,
+    rawTxHex: string,
+    resolutionConfig: ResolutionConfig,
+    throwOnError = false
+  ): Promise<{ r: string; s: string; v: string }> {
+    return this.strategy.clearSignTransaction(path, rawTxHex, resolutionConfig, throwOnError);
+  }
 
   // async signEIP712Message(path: string, jsonMessage: EIP712Message, fullImplem = false): Promise<{ v: number; s: string; r: string }> {
   //   return this.strategy.signEIP712Message(path, jsonMessage, fullImplem);
   // }
 
-  // async signEIP712HashedMessage(
-  //   path: string,
-  //   domainSeparatorHex: string,
-  //   hashStructMessageHex: string,
-  // ): Promise<{ v: number; s: string; r: string }> {
-  //   return this.eth.signEIP712HashedMessage(path, domainSeparatorHex, hashStructMessageHex)
-  // }
+  async signEIP712HashedMessage(
+    path: string,
+    domainSeparatorHex: string,
+    hashStructMessageHex: string,
+  ): Promise<{ v: number; s: string; r: string }> {
+    return this.strategy.signEIP712HashedMessage(path, domainSeparatorHex, hashStructMessageHex)
+  }
 }
